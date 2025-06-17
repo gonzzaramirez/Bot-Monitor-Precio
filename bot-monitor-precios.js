@@ -23,19 +23,16 @@ const URLS = {
   pollo: 'https://www.lareinacorrientes.com.ar/categoria-producto/carniceria/pollo/'
 };
 
-// Archivo para persistir precios anteriores
+// Archivos de persistencia
 const DB_FILE = path.join(__dirname, 'precios.json');
+const LAST_RUN_FILE = path.join(__dirname, 'ultima_ejecucion.json');
 let preciosAnteriores = {};
 
 // Cargar precios previos si existe y está bien formateado
 if (fs.existsSync(DB_FILE)) {
   try {
     const contenido = fs.readFileSync(DB_FILE, 'utf8').trim();
-    if (contenido) {
-      preciosAnteriores = JSON.parse(contenido);
-    } else {
-      preciosAnteriores = {};
-    }
+    preciosAnteriores = contenido ? JSON.parse(contenido) : {};
   } catch (err) {
     console.error('❌ Error al leer precios.json, inicializando base vacía:', err.message);
     preciosAnteriores = {};
@@ -45,16 +42,13 @@ if (fs.existsSync(DB_FILE)) {
 // Crear instancia de bot (modo polling)
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 
-// Extraer precios desde la página
+// Función para extraer precios desde la página
 async function extraerPrecios(url, categoria) {
   try {
-    const { data } = await axios.get(url, {
-      headers: { 'User-Agent': 'Mozilla/5.0' }
-    });
+    const { data } = await axios.get(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
     const $ = cheerio.load(data);
     const productos = [];
 
-    // Selector más específico para items de producto
     $('.woocommerce-loop-product__link').each((_, el) => {
       const nombre = $(el).find('.woocommerce-loop-product__title').text().trim();
       const precioTexto = $(el).find('.price').text().trim();
@@ -72,7 +66,7 @@ async function extraerPrecios(url, categoria) {
   }
 }
 
-// Comparar precios y detectar cambios
+// Función para comparar precios y detectar cambios
 function compararPrecios(nuevos, categoria) {
   const cambios = [];
   nuevos.forEach(p => {
@@ -81,23 +75,14 @@ function compararPrecios(nuevos, categoria) {
     if (prev != null && prev !== p.precio) {
       const dif = p.precio - prev;
       const pct = ((dif / prev) * 100).toFixed(2);
-      cambios.push({
-        nombre: p.nombre,
-        categoria,
-        precioAnterior: prev,
-        precioActual: p.precio,
-        diferencia: dif,
-        porcentaje: pct,
-        unidad: p.unidad,
-        tipo: dif > 0 ? 'aumento' : 'disminucion'
-      });
+      cambios.push({ ...p, precioAnterior: prev, diferencia: dif, porcentaje: pct, tipo: dif > 0 ? 'aumento' : 'disminucion' });
     }
     preciosAnteriores[key] = p.precio;
   });
   return cambios;
 }
 
-// Formatear mensaje de cambios
+// Formatea el mensaje de cambios
 function formatCambios(cambios) {
   if (!cambios.length) return null;
   let msg = '🔔 *CAMBIOS DE PRECIOS DETECTADOS*\n\n';
@@ -106,7 +91,7 @@ function formatCambios(cambios) {
     const sign = c.diferencia > 0 ? '+' : '';
     msg += `${emoji} *${c.nombre}* (${c.categoria.toUpperCase()})\n`;
     msg += `💰 Antes: $${c.precioAnterior.toLocaleString('es-AR')} (${c.unidad})\n`;
-    msg += `💰 Ahora: $${c.precioActual.toLocaleString('es-AR')}\n`;
+    msg += `💰 Ahora: $${c.precio.toLocaleString('es-AR')}\n`;
     msg += `📊 Cambio: ${sign}$${Math.abs(c.diferencia).toLocaleString('es-AR')} (${sign}${c.porcentaje}%)\n\n`;
   });
   msg += `⏰ ${new Date().toLocaleString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' })}`;
@@ -121,8 +106,9 @@ async function monitorear() {
     const productos = await extraerPrecios(url, cat);
     allCambios.push(...compararPrecios(productos, cat));
   }
-  // Guardar DB
+
   fs.writeFileSync(DB_FILE, JSON.stringify(preciosAnteriores, null, 2), 'utf8');
+  fs.writeFileSync(LAST_RUN_FILE, JSON.stringify({ ultimaEjecucion: new Date().toISOString() }), 'utf8');
 
   const msg = formatCambios(allCambios);
   if (msg) {
@@ -133,7 +119,9 @@ async function monitorear() {
   }
 }
 
-// Comando /precios para precios actuales
+// ----- COMANDOS DE TELEGRAM ----- //
+
+// /precios – precios actuales
 bot.onText(/\/precios/, async (msg) => {
   const id = msg.chat.id;
   await bot.sendMessage(id, '🔍 Obteniendo precios actuales...');
@@ -142,9 +130,7 @@ bot.onText(/\/precios/, async (msg) => {
     for (const [cat, url] of Object.entries(URLS)) {
       const productos = await extraerPrecios(url, cat);
       resp += `*${cat.toUpperCase()}:*\n`;
-      productos.forEach(p => {
-        resp += `• ${p.nombre}: $${p.precio.toLocaleString('es-AR')} (${p.unidad})\n`;
-      });
+      productos.forEach(p => resp += `• ${p.nombre}: $${p.precio.toLocaleString('es-AR')} (${p.unidad})\n`);
       resp += '\n';
     }
     resp += `⏰ ${new Date().toLocaleString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' })}`;
@@ -154,10 +140,58 @@ bot.onText(/\/precios/, async (msg) => {
   }
 });
 
-// Comando /help
+// /verificar – fuerza monitoreo manual
+bot.onText(/\/verificar/, async (msg) => {
+  const id = msg.chat.id;
+  await bot.sendMessage(id, '🔄 Ejecutando monitoreo manual...');
+  try {
+    await monitorear();
+    await bot.sendMessage(id, '✅ Monitoreo finalizado.');
+  } catch (err) {
+    await bot.sendMessage(id, `❌ Error en monitoreo: ${err.message}`);
+  }
+});
+
+// /ultima_ejecucion – muestra fecha y hora de la última ejecución
+bot.onText(/\/ultima_ejecucion/, (msg) => {
+  const id = msg.chat.id;
+  if (fs.existsSync(LAST_RUN_FILE)) {
+    const { ultimaEjecucion } = JSON.parse(fs.readFileSync(LAST_RUN_FILE, 'utf8'));
+    const fecha = new Date(ultimaEjecucion).toLocaleString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' });
+    bot.sendMessage(id, `🕒 Última ejecución: ${fecha}`);
+  } else {
+    bot.sendMessage(id, '❌ Aún no hay registros de ejecución.');
+  }
+});
+
+// /productos – lista todos los productos monitoreados
+bot.onText(/\/productos/, (msg) => {
+  const id = msg.chat.id;
+  const list = Object.keys(preciosAnteriores).map(key => key.split('_')[1]);
+  const uniq = [...new Set(list)];
+  bot.sendMessage(id, `📦 Productos monitoreados:\n${uniq.join('\n')}`);
+});
+
+// /categorias – lista las categorías disponibles
+bot.onText(/\/categorias/, (msg) => {
+  const id = msg.chat.id;
+  bot.sendMessage(id, `📂 Categorías:\n${Object.keys(URLS).join('\n')}`);
+});
+
+// /status – muestra estado general y configuración
+bot.onText(/\/status/, (msg) => {
+  const id = msg.chat.id;
+  const count = Object.keys(preciosAnteriores).length;
+  const sched = 'Diario a las 9:00 AM (America/Argentina/Buenos_Aires)';
+  bot.sendMessage(id, `⚙️ Status:\nProductos monitoreados: ${count}\nMonitoreo programado: ${sched}`);
+});
+
+// /help – ayuda ampliada
 bot.onText(/\/help/, (msg) => {
   const id = msg.chat.id;
-  const txt = `🤖 *Monitor de Precios*\n\n/comandos disponibles:\n/precios - precios actuales\n/help - esta ayuda\n\n⏰ Monitoreo diario a las 9:00 AM`;
+  const txt = `🤖 *Monitor de Precios - Comandos disponibles:*\n
+/precios – Ver precios actuales\n/verificar – Ejecutar monitoreo manual\n/ultima_ejecucion – Última ejecución automática/manual\n/productos – Listar productos monitoreados\n/categorias – Listar categorías disponibles\n/status – Estado y configuración del bot\n/help – Mostrar esta ayuda\n
+⏰ *Monitoreo automático:* todos los días a las 9:00 AM.`;
   bot.sendMessage(id, txt, { parse_mode: 'Markdown' });
 });
 
@@ -168,8 +202,8 @@ cron.schedule('0 9 * * *', () => {
 }, { timezone: 'America/Argentina/Buenos_Aires' });
 
 // Inicialización
-(async function init() {
+async function init() {
   console.log('🚀 Bot iniciado');
-  // Primer monitoreo al inicio
   await monitorear();
-})();
+}
+init();
