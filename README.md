@@ -14,7 +14,7 @@ Este bot desarrollado en Node.js permite monitorear automáticamente los precios
 
 1. Clona el repositorio:
    ```bash
-   git clone https://github.com/tu_usuario/bot-monitor-precios.git
+   git clone https://github.com/gonzzaramirez/Bot-Monitor-Precio
    cd bot-monitor-precios
    ```
 
